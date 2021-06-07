@@ -87,6 +87,7 @@ While this method doesn't provide the same detail as `exiwhat`, that tool is
 | daemon     | parent pid |
 | delivering | exim -Mc   |
 | handling   | exim -bd   |
+| handling   | exim -bdf   |
 | running    | exim -qG   |
 | other      | other      | 
 
