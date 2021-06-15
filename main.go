@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"io"
 	stdlog "log"
@@ -85,9 +86,10 @@ var (
 )
 
 var processFlags = map[string]string{
-	"-Mc": "delivering",
-	"-bd": "handling",
-	"-qG": "running",
+	"-Mc":  "delivering",
+	"-bd":  "handling",
+	"-bdf": "handling",
+	"-qG":  "running",
 }
 
 type Process struct {
@@ -171,6 +173,7 @@ func (e *Exporter) ProcessStates() map[string]float64 {
 		return states
 	}
 	for _, p := range processes {
+		level.Debug(e.logger).Log("msg", "process state", "isLeader", p.leader, "cmdline", fmt.Sprintf("%v", p.cmdline))
 		if len(p.cmdline) < 1 || path.Base(p.cmdline[0]) != e.eximBin {
 			continue
 		}
@@ -209,12 +212,13 @@ func (e *Exporter) CountMessages(dirname string) float64 {
 }
 
 func (e *Exporter) QueueSize() float64 {
-	level.Debug(e.logger).Log("msg", "Reading queue size")
+	level.Debug(e.logger).Log("msg", "Reading queue size", "path", e.inputPath)
 	count := e.CountMessages(e.inputPath)
 	for h := 0; h < len(BASE62); h++ {
 		hashPath := filepath.Join(e.inputPath, string(BASE62[h]))
 		count += e.CountMessages(hashPath)
 	}
+	level.Debug(e.logger).Log("msg", "Queue size", "count", count)
 	return count
 }
 
