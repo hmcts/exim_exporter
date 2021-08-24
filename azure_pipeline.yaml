@@ -1,0 +1,26 @@
+---
+trigger:
+  branches:
+    include:
+    - master
+
+variables:
+  ubuntuImage: Ubuntu-18.04
+
+stages:
+  - stage: ImageBuildRelease
+    displayName: Build and Release Container
+    pool:
+      vmImage: ${{ variables.ubuntuImage }}
+    jobs:
+      - job: ReleaseEximContainer
+        displayName: Build and Release Container
+        steps:
+          - template: pipeline/acr_build.yml
+            parameters:
+              spACR: 'DTS-SS-PUBLIC-PROD'
+              containerACRRepo: 'exim-exporter'
+              ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+                containerTag: 0.2.$(Rev:r)
+              ${{ if ne(variables['Build.SourceBranchName'], 'main') }}:
+                  containerTag: pr-$(System.PullRequest.PullRequestNumber)
