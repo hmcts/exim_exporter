@@ -6,6 +6,9 @@ trigger:
 
 variables:
   ubuntuImage: Ubuntu-18.04
+  majorMinorVersion: v0.2
+  ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
+    patchVersion: $[ counter(variables['majorMinorVersion'],0) ]
 
 stages:
   - stage: ImageBuildRelease
@@ -21,7 +24,7 @@ stages:
               spACR: 'DTS-SS-PUBLIC-PROD'
               containerACRRepo: 'exim-exporter'
               ${{ if eq(variables['Build.SourceBranchName'], 'main') }}:
-                containerTag: "0.2.$(Rev:r)"
+                containerTag: "${{ variables.majorMinorVersion }}.${{ variables.patchVersion }}"
               ${{ if and(eq(variables['Build.Reason'], 'PullRequest'), ne(variables['Build.SourceBranchName'], 'main') ) }}:
                 containerTag: "pr-$(System.PullRequest.PullRequestNumber)"
               ${{ if and(ne(variables['Build.Reason'], 'PullRequest'), ne(variables['Build.SourceBranchName'], 'main') ) }}:
