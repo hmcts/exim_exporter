@@ -27,16 +27,16 @@ import (
 )
 
 var (
-	logPath          = kingpin.Flag("exim.log-path", "Path to Exim panic log file.").Default("/var/log/exim4").Envar("EXIM_LOG_PATH").String()
-	mainlog          = kingpin.Flag("exim.mainlog", "Path to Exim main log file.").Default("mainlog").Envar("EXIM_MAINLOG").String()
-	rejectlog        = kingpin.Flag("exim.rejectlog", "Path to Exim reject log file.").Default("rejectlog").Envar("EXIM_REJECTLOG").String()
-	paniclog         = kingpin.Flag("exim.paniclog", "Path to Exim panic log file.").Default("paniclog").Envar("EXIM_PANICLOG").String()
-	eximExec         = kingpin.Flag("exim.executable", "Name of the Exim daemon executable.").Default("exim4").Envar("EXIM_EXECUTABLE").String()
+	logPath          = kingpin.Flag("exim.log-path", "Path to the Exim log files.").Default("/var/log/exim4").Envar("EXIM_LOG_PATH").String()
+	mainlog          = kingpin.Flag("exim.mainlog", "Exim main log filename in log-path directory.").Default("mainlog").Envar("EXIM_MAINLOG").String()
+	rejectlog        = kingpin.Flag("exim.rejectlog", "Exim reject log filename in log-path directory.").Default("rejectlog").Envar("EXIM_REJECTLOG").String()
+	paniclog         = kingpin.Flag("exim.paniclog", "Exim panic log filename in log-path directory.").Default("paniclog").Envar("EXIM_PANICLOG").String()
+	eximExec         = kingpin.Flag("exim.executable", "Path name of the Exim daemon executable.").Default("exim4").Envar("EXIM_EXECUTABLE").String()
+	useJournal       = kingpin.Flag("exim.use-journal", "Use the systemd journal instead of log file tailing").Envar("EXIM_USE_JOURNAL").Bool()
+	syslogIdentifier = kingpin.Flag("exim.syslog-identifier", "Syslog identifier used by Exim").Default("exim").Envar("EXIM_SYSLOG_IDENTIFIER").String()
 	inputPath        = kingpin.Flag("exim.input-path", "Path to Exim queue directory.").Default("/var/spool/exim4/input").Envar("EXIM_QUEUE_DIR").String()
 	listenAddress    = kingpin.Flag("web.listen-address", "Address to listen on for web interface and telemetry.").Default(":9636").Envar("WEB_LISTEN_ADDRESS").String()
-	metricsPath      = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").Envar("WEB_TELEMETRY_PATH").String()
-	useJournal       = kingpin.Flag("exim.use-journal", "Use the journal instead of log file tailing").Envar("EXIM_USE_JOURNAL").Bool()
-	syslogIdentifier = kingpin.Flag("exim.syslog-identifier", "Syslog identifier used by Exim").Default("exim").Envar("EXIM_SYSLOG_IDENTIFIER").String()
+	metricsPath      = kingpin.Flag("web.telemetry-path", "URI under which to expose metrics.").Default("/metrics").Envar("WEB_TELEMETRY_PATH").String()
 	tailPoll         = kingpin.Flag("tail.poll", "Poll logs for changes instead of using inotify.").Envar("TAIL_POLL").Bool()
 )
 
@@ -65,6 +65,13 @@ var (
 		},
 		[]string{"flag"},
 	)
+	eximIssues = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: prometheus.BuildFQName("exim", "", "issues_total"),
+			Help: "Total number of logged issues broken down by type (tls, smtp, connection, etc)",
+		},
+		[]string{"type"},
+	)
 	eximReject = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: prometheus.BuildFQName("exim", "", "reject_total"),
@@ -75,6 +82,12 @@ var (
 		prometheus.CounterOpts{
 			Name: prometheus.BuildFQName("exim", "", "panic_total"),
 			Help: "Total number of logged panic messages",
+		},
+	)
+	queueRuns = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: prometheus.BuildFQName("exim", "", "queue_runs"),
+			Help: "Total number of queue runs noted in the logs",
 		},
 	)
 	readErrors = prometheus.NewCounter(
@@ -254,19 +267,23 @@ func (e *Exporter) FileTail(filename string) chan *tail.Line {
 // JournalTail conditionally defined based on the "systemd" build tag.
 
 func (e *Exporter) TailMainLog(lines chan *tail.Line) {
+	level.Info(e.logger).Log("msg", "Tail mainlog")
 	for line := range lines {
 		if line.Err != nil {
 			level.Error(e.logger).Log("msg", "Caught error while reading mainlog", "err", line.Err)
 			readErrors.Inc()
 			continue
 		}
-		level.Debug(e.logger).Log("file", "mainlong", "msg", line.Text)
-		parts := strings.SplitN(line.Text, " ", 6)
+		level.Debug(e.logger).Log("file", "mainlog", "msg", line.Text)
+		parts := strings.SplitN(line.Text, " ", 7)
 		size := len(parts)
 		if size < 3 {
+			level.Info(e.logger).Log("msg", "Short line reading mainlog", "msg", line.Err)
 			continue
 		}
 		// Handle logs when PID logging is enabled
+		//   no pid: "2022-04-12 22:14:21 1neNq9-0008OD-06 Completed"
+		//   w/ pid: "2022-04-12 22:14:21 [4646] 1neNq9-0008OD-06 Completed"
 		var index int
 		if parts[2][0] == '[' {
 			index = 4
@@ -274,11 +291,21 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 			index = 3
 		}
 		if size < index+1 {
+			level.Info(e.logger).Log("msg", "No index part reading mainlog", "msg", line.Err)
 			continue
 		}
+		var tmp string = ""
+		if size > index+1 {
+			tmp = parts[index+1]
+		}
+		level.Debug(e.logger).Log("file", "mainlog", "parts[index-1]", parts[index-1], "parts[index]", parts[index], "parts[index+1]", tmp)
 		switch parts[index] {
 		case "<=":
-			eximMessages.With(prometheus.Labels{"flag": "arrived"}).Inc()
+			if (size > index+1) && (parts[index+1] == "<>") {
+				eximMessages.With(prometheus.Labels{"flag": "mailnotice"}).Inc()
+			} else {
+				eximMessages.With(prometheus.Labels{"flag": "arrived"}).Inc()
+			}
 		case "(=":
 			eximMessages.With(prometheus.Labels{"flag": "fakereject"}).Inc()
 		case "=>":
@@ -295,6 +322,38 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 			eximMessages.With(prometheus.Labels{"flag": "deferred"}).Inc()
 		case "Completed":
 			eximMessages.With(prometheus.Labels{"flag": "completed"}).Inc()
+		default:
+			// These messages have no associated queue id,
+			//   "2022-04-12 22:14:21 Start queue run: pid=229876"
+			switch parts[index-1] {
+			case "SMTP":
+				// Eg "SMTP protocol synchronisation error ..."
+				// Eg "SMTP data timeout ..."
+				// Eg "SMTP call from [ip] dropped ..."
+				eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
+			case "rejected":
+				// Eg "rejected EHLO from [ip]: syntactically invalid argument(s): []"
+				eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
+			case "auth_login":
+				// Eg "auth_login authenticator failed for ..."
+				eximIssues.With(prometheus.Labels{"type": "auth"}).Inc()
+			case "no":
+				// Eg "no host name found for IP ..."
+				eximIssues.With(prometheus.Labels{"type": "hostip"}).Inc()
+			case "TLS":
+				// Eg "TLS error on connection ..."
+				// Eg "TLS session (gnutls_handshake): Key usage ..."
+				eximIssues.With(prometheus.Labels{"type": "tls"}).Inc()
+			case "Connection":
+				// Eg "Connection from [ip] refused: too ...
+				eximIssues.With(prometheus.Labels{"type": "connect"}).Inc()
+			case "unexpected":
+				// Eg "unexpected disconnection ..."
+				eximIssues.With(prometheus.Labels{"type": "connect"}).Inc()
+			case "Start":
+				// Eg "Start queue run: pid=1234", also "End..."
+				queueRuns.Inc()
+			}
 		}
 	}
 }
@@ -326,8 +385,10 @@ func (e *Exporter) TailPanicLog(lines chan *tail.Line) {
 func init() {
 	prometheus.MustRegister(version.NewCollector("exim_exporter"))
 	prometheus.MustRegister(eximMessages)
+	prometheus.MustRegister(eximIssues)
 	prometheus.MustRegister(eximReject)
 	prometheus.MustRegister(eximPanic)
+	prometheus.MustRegister(queueRuns)
 	prometheus.MustRegister(readErrors)
 }
 
