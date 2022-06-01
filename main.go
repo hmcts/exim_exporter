@@ -1,13 +1,14 @@
 package main
 
 import (
-	"fmt"
+	//"fmt"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"io"
 	stdlog "log"
 	"log/syslog"
 	"net/http"
 	"os"
+	"errors"
 	"path"
 	"path/filepath"
 	"strings"
@@ -186,7 +187,7 @@ func (e *Exporter) ProcessStates() map[string]float64 {
 		return states
 	}
 	for _, p := range processes {
-		level.Debug(e.logger).Log("msg", "process state", "isLeader", p.leader, "cmdline", fmt.Sprintf("%v", p.cmdline))
+		//level.Debug(e.logger).Log("msg", "process state", "isLeader", p.leader, "cmdline", fmt.Sprintf("%v", p.cmdline))
 		if len(p.cmdline) < 1 || path.Base(p.cmdline[0]) != e.eximBin {
 			continue
 		}
@@ -248,10 +249,26 @@ func (e *Exporter) Start() {
 }
 
 func (e *Exporter) FileTail(filename string) chan *tail.Line {
-	level.Info(e.logger).Log("msg", "Opening log", "filename", filename)
 	logger := log.NewStdlibAdapter(e.logger)
+
+	// Try to open file for read; if it works, close and carry on. If not
+	// try to discover if the file exists, for a more useful message.
+	// Don't die here - it's possible the file will become available.
+	fp, err := os.Open(filename)
+	if err == nil {
+		fp.Close()
+		level.Info(e.logger).Log("msg", "Opening log", "filename", filename)
+	} else {
+		_, status := os.Stat(filename)
+		if errors.Is(status, os.ErrNotExist) {
+			level.Error(e.logger).Log("msg", "Log file does not exist", "filename", filename)
+		} else {
+			level.Error(e.logger).Log("msg", "Unable to open log", "filename", filename, "err", status)
+		}
+	}
+
 	t, err := tail.TailFile(filename, tail.Config{
-		Location: &tail.SeekInfo{Whence: io.SeekEnd},
+		Location: &tail.SeekInfo{Whence: io.SeekStart},
 		ReOpen:   true,
 		Follow:   true,
 		Poll:     *tailPoll,
@@ -275,7 +292,7 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 			continue
 		}
 		level.Debug(e.logger).Log("file", "mainlog", "msg", line.Text)
-		parts := strings.SplitN(line.Text, " ", 7)
+		parts := strings.SplitN(line.Text, " ", 14)
 		size := len(parts)
 		if size < 3 {
 			level.Info(e.logger).Log("msg", "Short line reading mainlog", "msg", line.Err)
@@ -303,81 +320,157 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 		case "<=":
 			if (size > index+1) && (parts[index+1] == "<>") {
 				eximMessages.With(prometheus.Labels{"flag": "mailnotice"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "mailnotice")
 			} else {
 				eximMessages.With(prometheus.Labels{"flag": "arrived"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "arrived")
 			}
 		case "(=":
 			eximMessages.With(prometheus.Labels{"flag": "fakereject"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "fakereject")
 		case "=>":
 			eximMessages.With(prometheus.Labels{"flag": "delivered"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "delivered")
 		case "->":
 			eximMessages.With(prometheus.Labels{"flag": "additional"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "additional")
 		case ">>":
 			eximMessages.With(prometheus.Labels{"flag": "cutthrough"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "cutthrough")
 		case "*>":
 			eximMessages.With(prometheus.Labels{"flag": "suppressed"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "suppressed")
 		case "**":
 			eximMessages.With(prometheus.Labels{"flag": "failed"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "failed")
 		case "==":
 			eximMessages.With(prometheus.Labels{"flag": "deferred"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "deferred")
 		case "Completed":
 			eximMessages.With(prometheus.Labels{"flag": "completed"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "completed")
+		case "DKIM:":
+			eximMessages.With(prometheus.Labels{"flag": "invalid"}).Inc()
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "invalid")
+		case "SMTP":
+			// Eg. "2022-06-01 12:33:20 1nwMTE-00061M-Fv SMTP data timeout (message abandoned) on connection from (mail.bmwturo.com) [203.28.246.235] F=<newsletter@mail.bmwturo.com>"
+			eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
+		case "Message":
+			//level.Debug(e.logger).Log("file", "mainlog", "Skip:", parts[index-1])
+		case "removed":
+			eximMessages.With(prometheus.Labels{"flag": "removed"}).Inc()
+			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "removed")
+		case "Added":
+			// E.g. "2022-05-29 23:52:35 1nvRlt-0018yn-Nl Added host 178.208.32.61 with HELO 'mailing-auth001.mailprotect.be' to known resenders"
+			//if (parts[len(parts)-1] == "resenders") {
+			//	eximMessages.With(prometheus.Labels{"flag": "resender"}).Inc()
+			//	//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "resender")
+			//	continue
+			//}
+			//level.Debug(e.logger).Log("file", "mainlog", "Ignore Added:", parts[index+1])
+			continue
 		default:
-			// These messages have no associated queue id,
+			// These messages have no associated queue id:
 			//   "2022-04-12 22:14:21 Start queue run: pid=229876"
+			//   "2022-06-01 12:04:00 H=(WIN-CLJ1B0GQ6JP) [45.134.23.236] F=<spameri@tiscali.it> rejected RCPT <spameri@tiscali.it>: relay not permitted"
+			//
+			// These messages do have an associated queue id:
+			//   "2022-06-01 13:48:42 1nwNm8-0006NL-F0 H=(mail.kittycaller.com) [23.171.176.140] F=<caskassetsmail@mail.cushcoins.com> rejected after DATA: Your message scored 22.8 SpamAssassin points. Report follows:"
+			//   "2022-06-01 11:00:03 1nwL8m-0005q8-75 H=fyi.udnoz.com (mail.uxflight.com) [89.34.27.82] X=TLS1.2:ECDHE_SECP256R1__RSA_SHA512__AES_256_GCM:256 CV=no F=<newsletter-ruth=ivimey.org@mail.uxflight.com> rejected after DATA: Your message scored 23.8 SpamAssassin points. Report follows:"
+			if size > (index+7) {
+				Fmark := 0
+				for i, p := range(parts) {
+					// Minimum is "F=<>"
+					if len(p) > 3 && p[0:3] == "F=<" {
+						Fmark = i
+						break
+					}
+				}
+				// Fmark is index of F=<...> line, so after complicating elements!
+				level.Debug(e.logger).Log("file", "mainlog", "Fmark", Fmark, "parts[Fmark]", parts[Fmark])
+				if Fmark > 0 {
+					if (Fmark+1 < len(parts)) && (parts[Fmark+1] == "rejected") {
+						if (Fmark+4 < len(parts)) && (parts[Fmark+4] == "relay") {
+							eximIssues.With(prometheus.Labels{"type": "relay"}).Inc()
+							level.Debug(e.logger).Log("file", "mainlog", "Inc:", "relay")
+							continue
+						}
+						if (Fmark+5 < len(parts)) && (parts[Fmark+3] == "DATA:") && (parts[Fmark+5] == "message") {
+							eximIssues.With(prometheus.Labels{"type": "spam"}).Inc()
+							level.Debug(e.logger).Log("file", "mainlog", "Inc:", "spam")
+							continue
+						}
+					}
+				}
+			}
 			switch parts[index-1] {
 			case "SMTP":
 				// Eg "SMTP protocol synchronisation error ..."
 				// Eg "SMTP data timeout ..."
 				// Eg "SMTP call from [ip] dropped ..."
 				eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
 			case "rejected":
 				// Eg "rejected EHLO from [ip]: syntactically invalid argument(s): []"
 				eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
 			case "auth_login":
 				// Eg "auth_login authenticator failed for ..."
 				eximIssues.With(prometheus.Labels{"type": "auth"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "auth")
 			case "no":
 				// Eg "no host name found for IP ..."
 				eximIssues.With(prometheus.Labels{"type": "hostip"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "hostip")
 			case "TLS":
 				// Eg "TLS error on connection ..."
 				// Eg "TLS session (gnutls_handshake): Key usage ..."
 				eximIssues.With(prometheus.Labels{"type": "tls"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "tls")
 			case "Connection":
 				// Eg "Connection from [ip] refused: too ...
 				eximIssues.With(prometheus.Labels{"type": "connect"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "connect")
 			case "unexpected":
 				// Eg "unexpected disconnection ..."
 				eximIssues.With(prometheus.Labels{"type": "connect"}).Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "connect")
 			case "Start":
 				// Eg "Start queue run: pid=1234", also "End..."
 				queueRuns.Inc()
+				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "queue")
+			case "End":
+				//level.Debug(e.logger).Log("file", "mainlog", "Skip:", parts[index-1])
+			default:
+				level.Debug(e.logger).Log("file", "mainlog", "Ignore:", parts[index-1])
 			}
 		}
 	}
 }
 
 func (e *Exporter) TailRejectLog(lines chan *tail.Line) {
+	level.Info(e.logger).Log("msg", "Tail rejectlog")
 	for line := range lines {
 		if line.Err != nil {
 			level.Error(e.logger).Log("msg", "Caught error while reading rejectlog", "err", line.Err)
 			readErrors.Inc()
 			continue
 		}
-		level.Debug(e.logger).Log("file", "rejectlog", "msg", line.Text)
+		//level.Debug(e.logger).Log("file", "rejectlog", "msg", line.Text)
 		eximReject.Inc()
 	}
 }
 
 func (e *Exporter) TailPanicLog(lines chan *tail.Line) {
+	level.Info(e.logger).Log("msg", "Tail paniclog")
 	for line := range lines {
 		if line.Err != nil {
 			level.Error(e.logger).Log("msg", "Caught error while reading paniclog", "err", line.Err)
 			readErrors.Inc()
 			continue
 		}
-		level.Debug(e.logger).Log("file", "paniclog", "msg", line.Text)
+		//level.Debug(e.logger).Log("file", "paniclog", "msg", line.Text)
 		eximPanic.Inc()
 	}
 }
