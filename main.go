@@ -59,6 +59,13 @@ var (
 		"Number of running exim process broken down by state (delivering, handling, etc)",
 		[]string{"state"}, nil,
 	)
+	eximAddresses = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: prometheus.BuildFQName("exim", "", "messages_origin"),
+			Help: "Total number of logged addresses broken down by domain",
+		},
+		[]string{"dir", "domain"},
+	)
 	eximMessages = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: prometheus.BuildFQName("exim", "", "messages_total"),
@@ -71,7 +78,7 @@ var (
 			Name: prometheus.BuildFQName("exim", "", "issues_total"),
 			Help: "Total number of logged issues broken down by type (tls, smtp, connection, etc)",
 		},
-		[]string{"type"},
+		[]string{"type", "ip"},
 	)
 	eximReject = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -316,59 +323,81 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 			tmp = parts[index+1]
 		}
 		level.Debug(e.logger).Log("file", "mainlog", "parts[index-1]", parts[index-1], "parts[index]", parts[index], "parts[index+1]", tmp)
+		// Example receive & transmit
+		// 2023-01-22 00:30:02 1pJOFF-000A1p-6c <= www-data@ivimey.org H=greyarea-web2.cam.ivimey.org [192.168.32.68] P=esmtps X=TLS1.3:ECDHE_SECP256R1__RSA_PSS_RSAE_SHA256__AES_256_GCM:256 CV=no K S=1395 id=E1pJOFF-000EIw-HE@greyarea-web2.cam.ivimey.org
+		// 2023-01-22 00:30:02 1pJOFF-000A1p-6c => ruth <root@ivimey.org> R=localuser_ivimeyorg T=imap_delivery C="250 2.0.0 <ruth@ivimey.org> 0YSHJ4qDzGOclgAAZKbkIA Saved"
 		switch parts[index] {
 		case "<=":
 			if (size > index+1) && (parts[index+1] == "<>") {
 				eximMessages.With(prometheus.Labels{"flag": "mailnotice"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "mailnotice")
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "mailnotice")
 			} else {
+				dom := strings.SplitN(parts[index+1], "@", 2)
+				if (len(dom) >1) {
+					eximAddresses.With(prometheus.Labels{"dir": "in", "domain": dom[1]}).Inc()
+				}
 				eximMessages.With(prometheus.Labels{"flag": "arrived"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "arrived")
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "arrived")
 			}
 		case "(=":
 			eximMessages.With(prometheus.Labels{"flag": "fakereject"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "fakereject")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "fakereject")
 		case "=>":
+			// E.g. "2023-04-02 22:54:59.679 1pj5f3-000R0a-Ua => ruth <ruth@ivimey.org> R=localuser_ivimeyorg T=imap_delivery S=8584 C="250 2.0.0 <ruth@ivimey.org> +WS7JbP5KWSVlQEAZKbkIA Saved" QT=5s DT=0.051s"
+			// E.g. "2023-04-03 06:00:25.256 1pjCIp-000SBw-5r => krr@yahoo.com R=dnslookup T=remote_smtp S=7332 H=mta7.am0.yahoodns.net [67.195.204.77] X=TLS1.3:ECDHE_X25519__RSA_PSS_RSAE_SHA256__AES_128_GCM:128 CV=yes C="250 ok dirdel" QT=2.048s DT=1.928s"
+			dom := strings.SplitN(parts[index+1], "@", 2)
+			if (len(dom) >1) {
+				eximAddresses.With(prometheus.Labels{"dir": "out", "domain": dom[1]}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "dir", "out", "domain", dom[1])
+			}
 			eximMessages.With(prometheus.Labels{"flag": "delivered"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "delivered")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "delivered")
 		case "->":
+			// E.g. "2023-04-04 08:36:50.114 1pjbDl-000W3q-E6 -> lekhas78@gmail.com R=dnslookup T=remote_smtp S=2137 H=gmail-smtp-in.l.google.com [172.253.116.26] TFO X=TLS1.3:ECDHE_X25519__ECDSA_SECP256R1_SHA256__AES_256_GCM:256 CV=yes K C="250 2.0.0 OK x2-20020adfdcc2000000b002d60952491dsi7369308wrm.96 - gsmtp" QT=0.650s DT=0.549sp"
+			dom := strings.SplitN(parts[index+1], "@", 2)
+			if (len(dom) >1) {
+				eximAddresses.With(prometheus.Labels{"dir": "out", "domain": dom[1]}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "dir", "out", "domain", dom[1])
+			}
 			eximMessages.With(prometheus.Labels{"flag": "additional"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "additional")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "additional")
 		case ">>":
 			eximMessages.With(prometheus.Labels{"flag": "cutthrough"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "cutthrough")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "cutthrough")
 		case "*>":
 			eximMessages.With(prometheus.Labels{"flag": "suppressed"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "suppressed")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "suppressed")
 		case "**":
 			eximMessages.With(prometheus.Labels{"flag": "failed"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "failed")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "failed")
 		case "==":
+			// E.g. "2023-04-04 16:11:27.273 1pjiJf-000X3F-3n == del.nolan@richmondfellowship.org.uk R=dnslookup T=remote_smtp defer (-44) H=eu-smtp-inbound-1.mimecast.com [195.130.217.241] DT=0.000s: SMTP error from remote mail server after RCPT TO:<del.nolan@richmondfellowship.org.uk>: 451 Internal resource temporarily unavailable - https://community.mimecast.com/docs/DOC-1369#451 [ws0CZUyZOQGkjzrBbHKwvw.uk186]"
 			eximMessages.With(prometheus.Labels{"flag": "deferred"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "deferred")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "deferred")
 		case "Completed":
+			// E.g. "2023-04-02 23:16:15.977 1pj5zj-000R3G-Sf Completed QT=0.088s"
 			eximMessages.With(prometheus.Labels{"flag": "completed"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "completed")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "completed")
 		case "DKIM:":
 			eximMessages.With(prometheus.Labels{"flag": "invalid"}).Inc()
 			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "invalid")
 		case "SMTP":
 			// Eg. "2022-06-01 12:33:20 1nwMTE-00061M-Fv SMTP data timeout (message abandoned) on connection from (mail.bmwturo.com) [203.28.246.235] F=<newsletter@mail.bmwturo.com>"
-			eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
+			eximIssues.With(prometheus.Labels{"type": "smtp", "ip": ""}).Inc()
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
 		case "Message":
-			//level.Debug(e.logger).Log("file", "mainlog", "Skip:", parts[index-1])
+			level.Debug(e.logger).Log("file", "mainlog", "Skip:", parts[index-1])
 		case "removed":
 			eximMessages.With(prometheus.Labels{"flag": "removed"}).Inc()
-			//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "removed")
+			level.Debug(e.logger).Log("file", "mainlog", "Inc:", "removed")
 		case "Added":
 			// E.g. "2022-05-29 23:52:35 1nvRlt-0018yn-Nl Added host 178.208.32.61 with HELO 'mailing-auth001.mailprotect.be' to known resenders"
-			//if (parts[len(parts)-1] == "resenders") {
-			//	eximMessages.With(prometheus.Labels{"flag": "resender"}).Inc()
-			//	//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "resender")
-			//	continue
-			//}
-			//level.Debug(e.logger).Log("file", "mainlog", "Ignore Added:", parts[index+1])
+			if (parts[len(parts)-1] == "resenders") {
+				eximMessages.With(prometheus.Labels{"flag": "resender"}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "resender")
+				continue
+			}
+			level.Debug(e.logger).Log("file", "mainlog", "Ignore Added:", parts[index+1])
 			continue
 		default:
 			// These messages have no associated queue id:
@@ -392,12 +421,12 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 				if Fmark > 0 {
 					if (Fmark+1 < len(parts)) && (parts[Fmark+1] == "rejected") {
 						if (Fmark+4 < len(parts)) && (parts[Fmark+4] == "relay") {
-							eximIssues.With(prometheus.Labels{"type": "relay"}).Inc()
+							eximIssues.With(prometheus.Labels{"type": "relay", "ip": ""}).Inc()
 							level.Debug(e.logger).Log("file", "mainlog", "Inc:", "relay")
 							continue
 						}
 						if (Fmark+5 < len(parts)) && (parts[Fmark+3] == "DATA:") && (parts[Fmark+5] == "message") {
-							eximIssues.With(prometheus.Labels{"type": "spam"}).Inc()
+							eximIssues.With(prometheus.Labels{"type": "spam", "ip": ""}).Inc()
 							level.Debug(e.logger).Log("file", "mainlog", "Inc:", "spam")
 							continue
 						}
@@ -409,39 +438,43 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 				// Eg "SMTP protocol synchronisation error ..."
 				// Eg "SMTP data timeout ..."
 				// Eg "SMTP call from [ip] dropped ..."
-				eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
+				eximIssues.With(prometheus.Labels{"type": "smtp", "ip": ""}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
 			case "rejected":
 				// Eg "rejected EHLO from [ip]: syntactically invalid argument(s): []"
-				eximIssues.With(prometheus.Labels{"type": "smtp"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
+				ip := strings.Trim(strings.TrimSuffix(parts[index+2], ":"), "[]")
+				eximIssues.With(prometheus.Labels{"type": "smtp", "ip": ip}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "smtp")
 			case "auth_login":
 				// Eg "auth_login authenticator failed for ..."
-				eximIssues.With(prometheus.Labels{"type": "auth"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "auth")
+				ip := strings.Trim(strings.TrimSuffix(parts[index+4], ":"), "[]")
+				eximIssues.With(prometheus.Labels{"type": "auth", "ip": ip}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "auth")
 			case "no":
 				// Eg "no host name found for IP ..."
-				eximIssues.With(prometheus.Labels{"type": "hostip"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "hostip")
+				ip := strings.Trim(strings.TrimSuffix(parts[index+6], ":"), "[]")
+				eximIssues.With(prometheus.Labels{"type": "hostip", "ip": ip}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "hostip")
 			case "TLS":
 				// Eg "TLS error on connection ..."
 				// Eg "TLS session (gnutls_handshake): Key usage ..."
-				eximIssues.With(prometheus.Labels{"type": "tls"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "tls")
+				eximIssues.With(prometheus.Labels{"type": "tls", "ip": ""}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "tls")
 			case "Connection":
 				// Eg "Connection from [ip] refused: too ...
-				eximIssues.With(prometheus.Labels{"type": "connect"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "connect")
+				ip := strings.Trim(strings.TrimSuffix(parts[index+1], ":"), "[]")
+				eximIssues.With(prometheus.Labels{"type": "connect", "ip": ip}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "connect")
 			case "unexpected":
 				// Eg "unexpected disconnection ..."
-				eximIssues.With(prometheus.Labels{"type": "connect"}).Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "connect")
+				eximIssues.With(prometheus.Labels{"type": "connect", "ip": ""}).Inc()
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "connect")
 			case "Start":
 				// Eg "Start queue run: pid=1234", also "End..."
 				queueRuns.Inc()
-				//level.Debug(e.logger).Log("file", "mainlog", "Inc:", "queue")
+				level.Debug(e.logger).Log("file", "mainlog", "Inc:", "queue")
 			case "End":
-				//level.Debug(e.logger).Log("file", "mainlog", "Skip:", parts[index-1])
+				level.Debug(e.logger).Log("file", "mainlog", "Skip:", parts[index-1])
 			default:
 				level.Debug(e.logger).Log("file", "mainlog", "Ignore:", parts[index-1])
 			}
@@ -457,7 +490,7 @@ func (e *Exporter) TailRejectLog(lines chan *tail.Line) {
 			readErrors.Inc()
 			continue
 		}
-		//level.Debug(e.logger).Log("file", "rejectlog", "msg", line.Text)
+		level.Debug(e.logger).Log("file", "rejectlog", "msg", line.Text)
 		eximReject.Inc()
 	}
 }
@@ -470,13 +503,14 @@ func (e *Exporter) TailPanicLog(lines chan *tail.Line) {
 			readErrors.Inc()
 			continue
 		}
-		//level.Debug(e.logger).Log("file", "paniclog", "msg", line.Text)
+		level.Debug(e.logger).Log("file", "paniclog", "msg", line.Text)
 		eximPanic.Inc()
 	}
 }
 
 func init() {
 	prometheus.MustRegister(version.NewCollector("exim_exporter"))
+	prometheus.MustRegister(eximAddresses)
 	prometheus.MustRegister(eximMessages)
 	prometheus.MustRegister(eximIssues)
 	prometheus.MustRegister(eximReject)
