@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"strconv"
 	"syscall"
 
 	"github.com/go-kit/kit/log"
@@ -257,6 +258,7 @@ func (e *Exporter) Start() {
 
 func (e *Exporter) FileTail(filename string) chan *tail.Line {
 	logger := log.NewStdlibAdapter(e.logger)
+	level.Debug(e.logger).Log("msg", "Start FileTail()", "filename", filename)
 
 	// Try to open file for read; if it works, close and carry on. If not
 	// try to discover if the file exists, for a more useful message.
@@ -283,8 +285,10 @@ func (e *Exporter) FileTail(filename string) chan *tail.Line {
 	})
 	if err != nil {
 		level.Error(e.logger).Log("msg", "Unable to open log", "err", err)
+		level.Debug(e.logger).Log("msg", "Exit FileTail()", "filename", filename)
 		os.Exit(1)
 	}
+	level.Debug(e.logger).Log("msg", "Return FileTail()", "filename", filename)
 	return t.Lines
 }
 
@@ -484,14 +488,54 @@ func (e *Exporter) TailMainLog(lines chan *tail.Line) {
 
 func (e *Exporter) TailRejectLog(lines chan *tail.Line) {
 	level.Info(e.logger).Log("msg", "Tail rejectlog")
+	var lineNumber int
+	var inMessage bool
+	var newMessage bool
+	lineNumber = 0
+	inMessage = false
+
 	for line := range lines {
+		var index int
+		lineNumber++
+
 		if line.Err != nil {
-			level.Error(e.logger).Log("msg", "Caught error while reading rejectlog", "err", line.Err)
+			level.Error(e.logger).Log("msg", "Caught error while reading rejectlog", "line", lineNumber, "err", line.Err)
 			readErrors.Inc()
 			continue
 		}
-		level.Debug(e.logger).Log("file", "rejectlog", "msg", line.Text)
-		eximReject.Inc()
+
+		// 2022-04-12 22:14:21...
+		if line.Text[0] == '2' && line.Text[1] == '0' {
+			// Date lines indicate a new message entry.
+			inMessage = false
+			eximReject.Inc()
+		} else if line.Text[0] == ' ' || line.Text[0] == '\t' || line.Text[0] == 'E' || line.Text[0] == 'P' || line.Text[0] == 'I' || line.Text[0] == 'F' || line.Text[0] == 'T' {
+			// In-Message lines start with WS, or one of "EPIFT".
+			inMessage = true
+		}
+
+		level.Debug(e.logger).Log("file", "rejectlog", "newMess", newMessage, "inMess", inMessage, "msg", line.Text)
+
+		if ! inMessage {
+			// ... "Your message scored 34.9 SpamAssassin points." ...
+			index = strings.Index(line.Text, "SpamAssassin points.")
+			if index > 0 {
+				var points float64
+				var endIdx int
+
+				// Skip back to last digit of number:
+				index--
+				endIdx = index
+				index--
+				// Now back to space before the start of number
+				for line.Text[index] != ' ' {
+					index--
+				}
+				// Now [index:endIdx] should be something like ' 33.1'
+				points, _ = strconv.ParseFloat(strings.Trim(line.Text[index:endIdx], " "), 64)
+				level.Info(e.logger).Log("msg", "SpamAssassin points", "points", points, "line", lineNumber, "msg", line.Err)
+			}
+		}
 	}
 }
 
